@@ -52,7 +52,7 @@ jobs:
             bin: yolo-cli.exe
           - platform: windows-aarch64
             os: windows-11-arm
-            target: aarch64-pc-windows-msvc
+            target: aarch64-pc-windows-gnullvm
             bin: yolo-cli.exe
 
     defaults:
