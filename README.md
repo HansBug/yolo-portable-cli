@@ -3,6 +3,38 @@
 A cross-platform, single-binary YOLO ONNX detection CLI written in Rust on top
 of the pure-Rust [`tract`](https://github.com/sonos/tract) runtime.
 
+## ⚠ Input requirement: the ONNX must be an Ultralytics-exported model
+
+This tool **is not a general ONNX object-detection runner**. It expects the
+ONNX file to be produced by the [Ultralytics](https://docs.ultralytics.com/)
+framework's `yolo export` command (or the equivalent
+`YOLO(...).export(format='onnx')` Python API), i.e. a `yolov5u` / `yolov8` /
+`yolov9` / `yolov10` / `yolo11` / `yolo12` detection model. The CLI relies on
+two hard contracts:
+
+1. **Metadata present.** Ultralytics embeds `names`, `imgsz`, `task`, `stride`,
+   `end2end` etc. in `metadata_props`. The CLI uses these to size the input
+   correctly, pick a decoder, and produce human-readable class labels.
+   Without them, the binary falls back to `640×640` and `class_<id>` labels
+   and behaviour quality depends entirely on whether the fallbacks match your
+   model. **Strongly recommend using official Ultralytics exports only.**
+2. **One of three supported output layouts:**
+   - `[1, 4+nc, N]` — YOLOv8 / v9 / v10 / v11 / v12 raw (features-major, no objectness)
+   - `[1, N, 5+nc]` — YOLOv5 / v7 raw (anchors-major, with objectness)
+   - `[1, K, 6]` — post-NMS / v10 end2end (`[x1,y1,x2,y2,score,cls]`)
+
+   Anything else (non-detection heads like `segment`/`pose`/`classify`,
+   custom multi-output heads, foreign ONNX converters such as keras2onnx,
+   non-YOLO detectors like DETR/RT-DETR, quantised int8 graphs with extra
+   QuantizeLinear/DequantizeLinear wrappers, etc.) is **not supported** and
+   the CLI will refuse with an error.
+
+If your ONNX wasn't produced by `yolo export` on an upstream Ultralytics
+model, this tool is not the right fit — look at
+[onnxruntime](https://onnxruntime.ai/) or a model-specific CLI instead.
+
+## Features
+
 - **No C/C++ runtime dependency.** Just `cargo build`. No `libonnxruntime.so`,
   no `libncnn.dylib`, no vendor runtime to ship alongside.
 - **Two build flavors** sharing a single library:
@@ -10,12 +42,11 @@ of the pure-Rust [`tract`](https://github.com/sonos/tract) runtime.
   - `yolo-cli-bundled`: ONNX (graph + weights) embedded at compile time via
     `include_bytes!`, producing a truly self-contained executable with no
     `--model` flag. Only built when the `bundled` Cargo feature is enabled.
-- **Universal YOLO output decoder.** Auto-detects YOLOv5/v7 (anchors-major,
-  with objectness), YOLOv8/v9/v10/v11/v12 (features-major, class-only), and
-  post-NMS / end2end (`[K,6]`) layouts, all from a single binary.
-- **Labels + imgsz read from ONNX metadata.** Ultralytics embeds `names` and
-  `imgsz` in `metadata_props`; the CLI parses them at load time. No hard-coded
-  COCO list, no `--labels` flag.
+- **Universal YOLO output decoder.** Auto-detects the three supported layouts
+  listed above, all from a single binary.
+- **Labels + imgsz read from ONNX metadata.** No hard-coded COCO list, no
+  `--labels` flag; each CI-tested YOLO version drives the table header and
+  the JSON output purely from its own `metadata_props`.
 - **Correctness validated in CI** against Ultralytics' own `.predict()` across
   **8 platform/arch combinations × 6 YOLO versions**, with both variants
   (free and bundled) built and verified in separate stages.
@@ -323,4 +354,4 @@ metadata hint.
 
 ## License
 
-MIT.
+Apache License 2.0 — see [`LICENSE`](LICENSE).
