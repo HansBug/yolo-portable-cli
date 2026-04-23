@@ -1317,7 +1317,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "yolo-tract"
+name = "yolo-cli"
 version = "0.1.0"
 dependencies = [
  "image",

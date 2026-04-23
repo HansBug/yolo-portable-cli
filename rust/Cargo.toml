@@ -1,21 +1,23 @@
 [package]
-name = "yolo-tract"
+name = "yolo-cli"
 version = "0.1.0"
 edition = "2021"
+description = "Portable single-binary YOLOv8 ONNX inference CLI (pure Rust, no C dependency)"
+license = "MIT OR Apache-2.0"
 
 [[bin]]
-name = "yolo-tract"
+name = "yolo-cli"
 path = "src/main.rs"
 
 [dependencies]
 tract-onnx = { version = "0.21", default-features = false }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image      = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 [profile.release]
-opt-level = 3
-lto = "fat"
+opt-level     = 3
+lto           = "thin"
 codegen-units = 1
-panic = "abort"
-strip = true
-debug = false
-incremental = false
+panic         = "abort"
+strip         = true
+debug         = false
+incremental   = false
