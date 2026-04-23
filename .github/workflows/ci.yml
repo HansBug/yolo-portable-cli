@@ -18,49 +18,52 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux: musl static (zero glibc/ld-linux dep, works on any Linux distro)
-          - platform: linux-x86_64
+          # Linux glibc (dynamic, Ubuntu/Debian/Fedora-style)
+          - platform: linux-x86_64-gnu
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bin: yolo-cli
+          - platform: linux-aarch64-gnu
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            bin: yolo-cli
+          # Linux musl (fully static, Alpine-compatible, runs on any distro)
+          - platform: linux-x86_64-musl
             os: ubuntu-22.04
             target: x86_64-unknown-linux-musl
             bin: yolo-cli
-            shell: bash
-          - platform: linux-aarch64
+          - platform: linux-aarch64-musl
             os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-musl
             bin: yolo-cli
-            shell: bash
-          # macOS: oldest free runners for max backwards compat
+          # macOS — oldest free runner per arch for max backward compat
           - platform: macos-x86_64
             os: macos-13
             target: x86_64-apple-darwin
             bin: yolo-cli
-            shell: bash
           - platform: macos-aarch64
             os: macos-14
             target: aarch64-apple-darwin
             bin: yolo-cli
-            shell: bash
-          # Windows: +crt-static so no VC++ redistributable needed on target machine
+          # Windows — +crt-static gives a standalone .exe with no VC redistributable
           - platform: windows-x86_64
             os: windows-2022
             target: x86_64-pc-windows-msvc
             bin: yolo-cli.exe
-            shell: bash
           - platform: windows-aarch64
             os: windows-11-arm
             target: aarch64-pc-windows-msvc
             bin: yolo-cli.exe
-            shell: bash
 
     defaults:
       run:
-        shell: ${{ matrix.shell }}
+        shell: bash
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install musl tools (Linux only)
-        if: startsWith(matrix.os, 'ubuntu')
+      - name: Install musl tools
+        if: endsWith(matrix.target, '-musl')
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
@@ -79,32 +82,34 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             rust/target
-          key: cargo-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.toml') }}
+          key: cargo-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
             cargo-${{ matrix.platform }}-
 
       - name: Build release binary
         working-directory: rust
-        run: cargo build --release --target ${{ matrix.target }} --locked=false
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Binary info
         working-directory: rust
         run: |
           BIN=target/${{ matrix.target }}/release/${{ matrix.bin }}
           ls -la "$BIN"
-          # size/dep diagnostics — platform-specific tool availability means we best-effort
-          if command -v file >/dev/null; then file "$BIN" || true; fi
-          if command -v ldd >/dev/null; then ldd "$BIN" 2>&1 || true; fi
-          if command -v otool >/dev/null; then otool -L "$BIN" || true; fi
-          if command -v dumpbin >/dev/null; then dumpbin //DEPENDENTS "$BIN" || true; fi
+          if command -v stat >/dev/null 2>&1; then
+            stat -c "%s bytes" "$BIN" 2>/dev/null || stat -f "%z bytes" "$BIN" 2>/dev/null || true
+          fi
+          command -v file >/dev/null 2>&1 && file "$BIN" || true
+          command -v ldd >/dev/null 2>&1 && ldd "$BIN" 2>&1 || true
+          command -v otool >/dev/null 2>&1 && otool -L "$BIN" || true
+          command -v dumpbin >/dev/null 2>&1 && dumpbin //DEPENDENTS "$BIN" || true
 
       - name: Run on fixtures
         working-directory: rust
         run: |
           BIN=target/${{ matrix.target }}/release/${{ matrix.bin }}
-          "$BIN" ../models/yolov8n.onnx ../assets/bus.jpg    | tee ../bus.out
-          "$BIN" ../models/yolov8n.onnx ../assets/zidane.jpg | tee ../zidane.out
-          "$BIN" ../models/yolov8n.onnx ../assets/dog.jpg    | tee ../dog.out
+          "$BIN" ../models/yolov8n.onnx ../assets/bus.jpg
+          "$BIN" ../models/yolov8n.onnx ../assets/zidane.jpg
+          "$BIN" ../models/yolov8n.onnx ../assets/dog.jpg
 
       - name: Verify against reference detections
         run: |
