@@ -1,0 +1,10 @@
+target/
+Cargo.lock
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+/dist/
+/release/
+/artifacts/
