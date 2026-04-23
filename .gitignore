@@ -7,3 +7,6 @@ __pycache__/
 /dist/
 /release/
 /artifacts/
+# PyTorch weights — kept out of git; the ONNX is the deployment artifact.
+# Regenerate with `yolo export model=<id>.pt format=onnx opset=12 simplify=True imgsz=640`.
+models/*.pt

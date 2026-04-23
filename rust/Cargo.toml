@@ -2,16 +2,26 @@
 name = "yolo-cli"
 version = "0.1.0"
 edition = "2021"
-description = "Portable single-binary YOLOv8 ONNX inference CLI (pure Rust, no C dependency)"
-license = "MIT OR Apache-2.0"
+description = "Portable single-binary YOLO ONNX inference CLI (pure Rust, no C dependency)"
+license = "MIT"
+build = "build.rs"
+
+[lib]
+name = "yolo_cli"
+path = "src/lib.rs"
 
 [[bin]]
 name = "yolo-cli"
-path = "src/main.rs"
+path = "src/bin/yolo-cli.rs"
+
+[[bin]]
+name = "yolo-cli-bundled"
+path = "src/bin/yolo-cli-bundled.rs"
 
 [dependencies]
 tract-onnx = { version = "0.21", default-features = false }
 image      = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+anyhow     = { version = "1", default-features = false, features = ["std"] }
 
 [profile.release]
 opt-level     = 3

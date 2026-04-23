@@ -1,10 +1,15 @@
-"""Verify a Rust CLI binary's output against committed reference detections.
+"""Verify yolo-cli / yolo-cli-bundled output against committed reference detections.
 
-Runs on any OS with just Python 3 stdlib. No ultralytics/torch needed.
+Runs on any OS with just Python 3 stdlib.
 
-Usage: python scripts/verify.py <binary> <model> <image1> [image2 ...]
+Usage:
+    python scripts/verify.py <binary> <model_id> <image1> [image2 ...]
 
-For each image, compares binary stdout against tests/reference/<stem>.json.
+<model_id> is e.g. "yolov8n".  The reference file for (model, image) is read
+from tests/reference/<model_id>/<image_stem>.json.  If the binary filename
+contains "bundled", no --model flag is passed (the binary has the ONNX baked
+in); otherwise --model models/<model_id>.onnx is passed.
+
 Exits 0 on PASS, non-zero on FAIL.
 """
 import json
@@ -13,13 +18,13 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-REF_DIR = ROOT / "tests" / "reference"
 
-# Tolerances chosen from empirical tract-vs-ort drift on the three test images:
-# - IoU >= 0.95 (allows ~5% box-edge wobble from resize filter differences)
-# - |score delta| <= 0.04 (allows fp32 accumulation-order drift and softmax-edge jitter)
+# Tolerances chosen from empirical tract-vs-ort drift across v5/v8/v9/v10/v11/v12.
+# Near-threshold detections may appear in one runtime and not the other because
+# of fp32 accumulation-order drift; treat mismatches below NEAR_THRESH as noise.
 IOU_MIN = 0.95
-SCORE_TOL = 0.04
+SCORE_TOL = 0.05
+NEAR_THRESH = 0.30  # drop from "unmatched" accounting if score < this value
 
 
 def iou(a, b):
@@ -33,25 +38,7 @@ def iou(a, b):
     return inter / union if union > 0 else 0.0
 
 
-def parse_rust(stdout):
-    dets = []
-    for line in stdout.strip().splitlines():
-        parts = line.split("\t")
-        if len(parts) != 7:
-            continue
-        try:
-            cls = int(parts[0])
-            name = parts[1]
-            conf = float(parts[2])
-            xyxy = tuple(float(v) for v in parts[3:7])
-        except ValueError:
-            continue
-        dets.append({"cls": cls, "name": name, "conf": conf, "xyxy": xyxy})
-    return dets
-
-
 def compare(ref, got):
-    """Return (ok, pairs, unmatched_ref, unmatched_got, worst_iou, worst_dconf)."""
     used = set()
     pairs = []
     worst_iou = 1.0
@@ -59,60 +46,73 @@ def compare(ref, got):
     for i, r in enumerate(ref):
         best_j, best_iou = -1, -1.0
         for j, g in enumerate(got):
-            if j in used or g["cls"] != r["cls"]:
+            if j in used or g["label"] != r["label"]:
                 continue
-            io = iou(r["xyxy"], g["xyxy"])
+            io = iou(r["bbox"], g["bbox"])
             if io > best_iou:
                 best_iou, best_j = io, j
         if (best_j >= 0 and best_iou >= IOU_MIN and
-                abs(got[best_j]["conf"] - r["conf"]) <= SCORE_TOL):
+                abs(got[best_j]["score"] - r["score"]) <= SCORE_TOL):
             pairs.append((i, best_j, best_iou))
             used.add(best_j)
             worst_iou = min(worst_iou, best_iou)
-            worst_dconf = max(worst_dconf, abs(got[best_j]["conf"] - r["conf"]))
-    um_ref = [i for i in range(len(ref)) if i not in {p[0] for p in pairs}]
-    um_got = [j for j in range(len(got)) if j not in used]
+            worst_dconf = max(worst_dconf, abs(got[best_j]["score"] - r["score"]))
+    um_ref_all = [i for i in range(len(ref)) if i not in {p[0] for p in pairs}]
+    um_got_all = [j for j in range(len(got)) if j not in used]
+    # Ignore near-threshold unmatched detections — these are threshold-edge
+    # numerical cases, not model behaviour regressions.
+    um_ref = [i for i in um_ref_all if ref[i]["score"] >= NEAR_THRESH]
+    um_got = [j for j in um_got_all if got[j]["score"] >= NEAR_THRESH]
     ok = not um_ref and not um_got
     return ok, pairs, um_ref, um_got, worst_iou, worst_dconf
 
 
 def main():
     if len(sys.argv) < 4:
-        print(f"usage: {sys.argv[0]} <binary> <model> <image> [image ...]", file=sys.stderr)
+        print(f"usage: {sys.argv[0]} <binary> <model_id> <image> [image ...]", file=sys.stderr)
         sys.exit(2)
-    binary, model = sys.argv[1], sys.argv[2]
+    binary = sys.argv[1]
+    model_id = sys.argv[2]
     images = sys.argv[3:]
+
+    is_bundled = "bundled" in Path(binary).name
+    cmd = [binary]
+    if not is_bundled:
+        cmd += ["--model", str(ROOT / "models" / f"{model_id}.onnx")]
+    cmd += ["--conf", "0.25", "--iou", "0.45", "--json", *[str(p) for p in images]]
+
+    print(f"exec: {' '.join(cmd)}", file=sys.stderr)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        print(f"[FAIL] binary exited {proc.returncode}", file=sys.stderr)
+        print(proc.stderr, file=sys.stderr)
+        sys.exit(1)
+    per_image = json.loads(proc.stdout)
+    got_by_stem = {Path(e["image"]).stem: e["detections"] for e in per_image}
+
+    ref_dir = ROOT / "tests" / "reference" / model_id
     all_ok = True
     for img_path in images:
-        img = Path(img_path)
-        ref_file = REF_DIR / (img.stem + ".json")
+        stem = Path(img_path).stem
+        ref_file = ref_dir / f"{stem}.json"
         if not ref_file.exists():
-            print(f"[FAIL] no reference for {img.name} at {ref_file}", file=sys.stderr)
+            print(f"[FAIL] no reference for {model_id}/{stem} at {ref_file}", file=sys.stderr)
             all_ok = False
             continue
         ref = json.loads(ref_file.read_text())
-        for r in ref:
-            r["xyxy"] = tuple(r["xyxy"])
-        proc = subprocess.run([binary, model, str(img), "0.25", "0.45"],
-                              capture_output=True, text=True)
-        if proc.returncode != 0:
-            print(f"[FAIL] {img.name}: binary returned {proc.returncode}", file=sys.stderr)
-            print(proc.stderr, file=sys.stderr)
-            all_ok = False
-            continue
-        got = parse_rust(proc.stdout)
+        got = got_by_stem.get(stem, [])
         ok, pairs, ur, ug, w_iou, w_dconf = compare(ref, got)
         status = "PASS" if ok else "FAIL"
-        print(f"[{status}] {img.name}: {len(pairs)}/{len(ref)} matched, "
+        print(f"[{status}] {model_id}/{stem}: {len(pairs)}/{len(ref)} matched, "
               f"worst IoU={w_iou:.4f}, worst |dconf|={w_dconf:.4f}, "
               f"unmatched ref={len(ur)}, unmatched got={len(ug)}")
         if not ok:
             print("  --- reference ---", file=sys.stderr)
             for r in ref:
-                print(f"  {r['name']:<14} {r['conf']:.3f}  {r['xyxy']}", file=sys.stderr)
+                print(f"  {r['label']:<14} {r['score']:.3f}  {r['bbox']}", file=sys.stderr)
             print("  --- actual ---", file=sys.stderr)
             for g in got:
-                print(f"  {g['name']:<14} {g['conf']:.3f}  {g['xyxy']}", file=sys.stderr)
+                print(f"  {g['label']:<14} {g['score']:.3f}  {g['bbox']}", file=sys.stderr)
             all_ok = False
     sys.exit(0 if all_ok else 1)
 

@@ -11,53 +11,74 @@ permissions:
 
 jobs:
   build-and-verify:
-    name: ${{ matrix.platform }}
+    name: ${{ matrix.platform }} / ${{ matrix.model }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        platform:
+          - linux-x86_64-gnu
+          - linux-aarch64-gnu
+          - linux-x86_64-musl
+          - linux-aarch64-musl
+          - macos-x86_64
+          - macos-aarch64
+          - windows-x86_64
+          - windows-aarch64
+        model:
+          - yolov5nu
+          - yolov8n
+          - yolov9t
+          - yolov10n
+          - yolo11n
+          - yolo12n
         include:
-          # Linux glibc (dynamic, Ubuntu/Debian/Fedora-style)
           - platform: linux-x86_64-gnu
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            bin: yolo-cli
+            ext: ""
           - platform: linux-aarch64-gnu
             os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-            bin: yolo-cli
-          # Linux musl (fully static, Alpine-compatible, runs on any distro)
+            ext: ""
           - platform: linux-x86_64-musl
             os: ubuntu-22.04
             target: x86_64-unknown-linux-musl
-            bin: yolo-cli
+            ext: ""
           - platform: linux-aarch64-musl
             os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-musl
-            bin: yolo-cli
-          # macOS — oldest free runner per arch for max backward compat
+            ext: ""
+          # macOS: macos-13 Intel was retired 2025-12; macos-15-intel is the
+          # last free Intel runner (end of life ~Fall 2027 per Apple).
           - platform: macos-x86_64
-            os: macos-13
+            os: macos-15-intel
             target: x86_64-apple-darwin
-            bin: yolo-cli
+            ext: ""
           - platform: macos-aarch64
             os: macos-14
             target: aarch64-apple-darwin
-            bin: yolo-cli
-          # Windows — +crt-static gives a standalone .exe with no VC redistributable
+            ext: ""
           - platform: windows-x86_64
             os: windows-2022
             target: x86_64-pc-windows-msvc
-            bin: yolo-cli.exe
+            ext: ".exe"
+          # Windows ARM64: tract-linalg's GAS-style ARM64 assembly can't be
+          # consumed by MSVC armasm64, so we cross to the LLVM toolchain via
+          # the gnullvm triple + llvm-mingw (installed below).
           - platform: windows-aarch64
             os: windows-11-arm
             target: aarch64-pc-windows-gnullvm
-            bin: yolo-cli.exe
+            ext: ".exe"
 
     defaults:
       run:
         shell: bash
+
+    env:
+      FREE_BIN: yolo-cli${{ matrix.ext }}
+      BUNDLED_BIN: yolo-cli-bundled${{ matrix.ext }}
 
     steps:
       - uses: actions/checkout@v4
@@ -70,17 +91,15 @@ jobs:
 
       - name: Install llvm-mingw (Windows gnullvm)
         if: endsWith(matrix.target, '-pc-windows-gnullvm')
-        shell: bash
         run: |
           # llvm-mingw provides aarch64-w64-mingw32-clang + lld needed by rustc's
-          # *-pc-windows-gnullvm targets. MSVC's armasm64 cannot parse tract-linalg's
-          # GAS-flavored ARM64 assembly, so we build with the LLVM toolchain instead.
+          # *-pc-windows-gnullvm target. MSVC's armasm64 can't parse tract-linalg's
+          # GAS-flavored ARM64 assembly, so we build with the LLVM toolchain.
           URL="https://github.com/mstorsjo/llvm-mingw/releases/download/20250730/llvm-mingw-20250730-ucrt-aarch64.zip"
           curl -fsSL -o llvm-mingw.zip "$URL"
           7z x llvm-mingw.zip -oC:/llvm-mingw >/dev/null
           DIR=$(ls -d C:/llvm-mingw/llvm-mingw-*/bin)
           echo "$DIR" >> "$GITHUB_PATH"
-          # sanity
           "$DIR/aarch64-w64-mingw32-clang" --version || true
 
       - name: Install Rust stable + target
@@ -97,46 +116,65 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             rust/target
-          key: cargo-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.lock') }}
+          # platform + model in key: changing YOLO_MODEL_ONNX forces the
+          # bundled binary's build.rs to rerun, so model membership is real cache state.
+          key: cargo-${{ matrix.platform }}-${{ matrix.model }}-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
+            cargo-${{ matrix.platform }}-${{ matrix.model }}-
             cargo-${{ matrix.platform }}-
 
-      - name: Build release binary
+      - name: Build both binaries (YOLO_MODEL_ONNX=${{ matrix.model }}.onnx)
         working-directory: rust
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        env:
+          YOLO_MODEL_ONNX: ../models/${{ matrix.model }}.onnx
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }} --bins
 
       - name: Binary info
         working-directory: rust
         run: |
-          BIN=target/${{ matrix.target }}/release/${{ matrix.bin }}
-          ls -la "$BIN"
-          if command -v stat >/dev/null 2>&1; then
-            stat -c "%s bytes" "$BIN" 2>/dev/null || stat -f "%z bytes" "$BIN" 2>/dev/null || true
-          fi
-          command -v file >/dev/null 2>&1 && file "$BIN" || true
-          command -v ldd >/dev/null 2>&1 && ldd "$BIN" 2>&1 || true
-          command -v otool >/dev/null 2>&1 && otool -L "$BIN" || true
-          command -v dumpbin >/dev/null 2>&1 && dumpbin //DEPENDENTS "$BIN" || true
+          FREE=target/${{ matrix.target }}/release/${{ env.FREE_BIN }}
+          BUNDLED=target/${{ matrix.target }}/release/${{ env.BUNDLED_BIN }}
+          ls -la "$FREE" "$BUNDLED"
+          command -v file  >/dev/null 2>&1 && { file "$FREE"; file "$BUNDLED"; } || true
+          command -v ldd   >/dev/null 2>&1 && { echo "-- ldd free --"; ldd "$FREE" 2>&1 || true; echo "-- ldd bundled --"; ldd "$BUNDLED" 2>&1 || true; } || true
+          command -v otool >/dev/null 2>&1 && { otool -L "$FREE" || true; otool -L "$BUNDLED" || true; } || true
+          command -v dumpbin >/dev/null 2>&1 && { dumpbin //DEPENDENTS "$FREE" || true; dumpbin //DEPENDENTS "$BUNDLED" || true; } || true
 
-      - name: Run on fixtures
+      - name: Sanity run (free + bundled)
         working-directory: rust
         run: |
-          BIN=target/${{ matrix.target }}/release/${{ matrix.bin }}
-          "$BIN" ../models/yolov8n.onnx ../assets/bus.jpg
-          "$BIN" ../models/yolov8n.onnx ../assets/zidane.jpg
-          "$BIN" ../models/yolov8n.onnx ../assets/dog.jpg
+          FREE=target/${{ matrix.target }}/release/${{ env.FREE_BIN }}
+          BUNDLED=target/${{ matrix.target }}/release/${{ env.BUNDLED_BIN }}
+          echo "::group::--help / --version"
+          "$FREE" --version || true
+          "$FREE" --help || true
+          "$BUNDLED" --version || true
+          "$BUNDLED" --help || true
+          echo "::endgroup::"
 
-      - name: Verify against reference detections
+      - name: Verify free binary against reference
+        working-directory: ${{ github.workspace }}
         run: |
           python3 scripts/verify.py \
-            rust/target/${{ matrix.target }}/release/${{ matrix.bin }} \
-            models/yolov8n.onnx \
+            rust/target/${{ matrix.target }}/release/${{ env.FREE_BIN }} \
+            ${{ matrix.model }} \
             assets/bus.jpg assets/zidane.jpg assets/dog.jpg
 
-      - name: Upload binary artifact
+      - name: Verify bundled binary against reference
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 scripts/verify.py \
+            rust/target/${{ matrix.target }}/release/${{ env.BUNDLED_BIN }} \
+            ${{ matrix.model }} \
+            assets/bus.jpg assets/zidane.jpg assets/dog.jpg
+
+      - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
-          name: yolo-cli-${{ matrix.platform }}
-          path: rust/target/${{ matrix.target }}/release/${{ matrix.bin }}
+          name: yolo-cli-${{ matrix.platform }}-${{ matrix.model }}
+          path: |
+            rust/target/${{ matrix.target }}/release/${{ env.FREE_BIN }}
+            rust/target/${{ matrix.target }}/release/${{ env.BUNDLED_BIN }}
           retention-days: 14
           if-no-files-found: error
