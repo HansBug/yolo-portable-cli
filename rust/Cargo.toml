@@ -6,6 +6,14 @@ description = "Portable single-binary YOLO ONNX inference CLI (pure Rust, no C d
 license = "MIT"
 build = "build.rs"
 
+[features]
+default = []
+# Enable this feature to build the `yolo-cli-bundled` binary (the model is
+# embedded at compile time via `include_bytes!`).  Without it, only `yolo-cli`
+# (the free variant that takes --model at runtime) is built, and the
+# YOLO_MODEL_ONNX env var is ignored entirely.
+bundled = []
+
 [lib]
 name = "yolo_cli"
 path = "src/lib.rs"
@@ -17,6 +25,7 @@ path = "src/bin/yolo-cli.rs"
 [[bin]]
 name = "yolo-cli-bundled"
 path = "src/bin/yolo-cli-bundled.rs"
+required-features = ["bundled"]
 
 [dependencies]
 tract-onnx = { version = "0.21", default-features = false }

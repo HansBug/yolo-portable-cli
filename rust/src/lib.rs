@@ -42,6 +42,12 @@ pub struct ParsedArgs {
     pub help: bool,
     /// Version was requested → caller should print version and exit 0.
     pub version: bool,
+    /// --info was requested → caller should load the model, print metadata, exit 0.
+    pub info: bool,
+    /// true iff --conf was passed on the command line (used to pick metadata default).
+    pub conf_explicit: bool,
+    /// true iff --iou was passed on the command line.
+    pub iou_explicit: bool,
 }
 
 pub enum Mode {
@@ -57,6 +63,9 @@ pub fn parse_args(argv: &[String], mode: Mode) -> Result<ParsedArgs, String> {
     let mut model: Option<PathBuf> = None;
     let mut help = false;
     let mut version = false;
+    let mut info = false;
+    let mut conf_explicit = false;
+    let mut iou_explicit = false;
 
     let mut i = 1;
     while i < argv.len() {
@@ -77,9 +86,16 @@ pub fn parse_args(argv: &[String], mode: Mode) -> Result<ParsedArgs, String> {
         match flag.as_str() {
             "--help" | "-h" => help = true,
             "--version" | "-V" => version = true,
+            "--info" => info = true,
             "--json" => json = true,
-            "--conf" => conf = take_value("--conf")?.parse().map_err(|e| format!("--conf: {e}"))?,
-            "--iou" => iou = take_value("--iou")?.parse().map_err(|e| format!("--iou: {e}"))?,
+            "--conf" => {
+                conf = take_value("--conf")?.parse().map_err(|e| format!("--conf: {e}"))?;
+                conf_explicit = true;
+            }
+            "--iou" => {
+                iou = take_value("--iou")?.parse().map_err(|e| format!("--iou: {e}"))?;
+                iou_explicit = true;
+            }
             "--model" => match mode {
                 Mode::Free => model = Some(PathBuf::from(take_value("--model")?)),
                 Mode::Bundled => {
@@ -94,13 +110,18 @@ pub fn parse_args(argv: &[String], mode: Mode) -> Result<ParsedArgs, String> {
         i += 1;
     }
 
+    let result = ParsedArgs {
+        common: CommonArgs { images: images.clone(), conf, iou, json },
+        model: model.clone(),
+        help,
+        version,
+        info,
+        conf_explicit,
+        iou_explicit,
+    };
+
     if help || version {
-        return Ok(ParsedArgs {
-            common: CommonArgs { images, conf, iou, json },
-            model,
-            help,
-            version,
-        });
+        return Ok(result);
     }
 
     match mode {
@@ -109,21 +130,13 @@ pub fn parse_args(argv: &[String], mode: Mode) -> Result<ParsedArgs, String> {
                 return Err("missing --model MODEL.onnx (required by the free yolo-cli)".into());
             }
         }
-        Mode::Bundled => {
-            if model.is_some() {
-                return Err("--model is not accepted by yolo-cli-bundled".into());
-            }
-        }
+        Mode::Bundled => {}
     }
-    if images.is_empty() {
+    // --info doesn't need any images
+    if !info && images.is_empty() {
         return Err("no input images given".into());
     }
-    Ok(ParsedArgs {
-        common: CommonArgs { images, conf, iou, json },
-        model,
-        help,
-        version,
-    })
+    Ok(result)
 }
 
 // ============================================================================
@@ -141,6 +154,15 @@ pub struct Meta {
     pub names: BTreeMap<u32, String>,
     pub imgsz: (u32, u32),
     pub end2end: bool,
+    /// Optional default confidence threshold picked up from ONNX metadata_props.
+    /// Ultralytics doesn't currently embed this, but if a future export pipeline
+    /// writes a "conf" / "conf_threshold" / "score_threshold" key, we honour it.
+    pub default_conf: Option<f32>,
+    /// Optional default IoU threshold (same rationale; keys "iou" / "iou_threshold").
+    pub default_iou: Option<f32>,
+    pub task: Option<String>,
+    pub version: Option<String>,
+    pub stride: Option<u32>,
 }
 
 pub fn parse_names(raw: &str) -> BTreeMap<u32, String> {
@@ -188,6 +210,11 @@ pub fn read_meta(proto: &tract_onnx::pb::ModelProto) -> Meta {
     let mut names = BTreeMap::new();
     let mut imgsz = (640u32, 640u32);
     let mut end2end = false;
+    let mut default_conf = None;
+    let mut default_iou = None;
+    let mut task = None;
+    let mut version = None;
+    let mut stride = None;
     for p in &proto.metadata_props {
         match p.key.as_str() {
             "names" => names = parse_names(&p.value),
@@ -197,10 +224,23 @@ pub fn read_meta(proto: &tract_onnx::pb::ModelProto) -> Meta {
                 }
             }
             "end2end" => end2end = matches!(p.value.as_str(), "True" | "true" | "1"),
+            "conf" | "conf_threshold" | "score_threshold" => {
+                if let Ok(v) = p.value.trim().parse::<f32>() {
+                    default_conf = Some(v);
+                }
+            }
+            "iou" | "iou_threshold" | "nms_iou_threshold" => {
+                if let Ok(v) = p.value.trim().parse::<f32>() {
+                    default_iou = Some(v);
+                }
+            }
+            "task" => task = Some(p.value.clone()),
+            "version" => version = Some(p.value.clone()),
+            "stride" => stride = p.value.trim().parse().ok(),
             _ => {}
         }
     }
-    Meta { names, imgsz, end2end }
+    Meta { names, imgsz, end2end, default_conf, default_iou, task, version, stride }
 }
 
 pub fn label_of(names: &BTreeMap<u32, String>, cls: u32) -> String {
@@ -437,13 +477,16 @@ pub struct ModelHandle {
     pub format: OutputFormat,
     pub nc: usize,
     pub names: BTreeMap<u32, String>,
+    pub out_shape: Vec<usize>,
+    pub size_bytes: usize,
+    pub source: String,
     pub runnable: RunnableModel<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>,
 }
 
-pub fn load_model_from_bytes(bytes: &[u8]) -> TractResult<ModelHandle> {
+pub fn load_model_from_bytes(bytes: &[u8], source: impl Into<String>) -> TractResult<ModelHandle> {
     let onnx = tract_onnx::onnx();
     let proto = onnx.proto_model_for_read(&mut std::io::Cursor::new(bytes))?;
-    build_from_proto(&proto)
+    build_from_proto(&proto, bytes.len(), source.into())
 }
 
 pub fn load_model_from_path(path: &Path) -> TractResult<ModelHandle> {
@@ -454,10 +497,14 @@ pub fn load_model_from_path(path: &Path) -> TractResult<ModelHandle> {
     f.read_to_end(&mut buf)
         .map_err(|e| anyhow::anyhow!("read {:?}: {e}", path))?;
     let proto = onnx.proto_model_for_read(&mut std::io::Cursor::new(&buf))?;
-    build_from_proto(&proto)
+    build_from_proto(&proto, buf.len(), path.display().to_string())
 }
 
-fn build_from_proto(proto: &tract_onnx::pb::ModelProto) -> TractResult<ModelHandle> {
+fn build_from_proto(
+    proto: &tract_onnx::pb::ModelProto,
+    size_bytes: usize,
+    source: String,
+) -> TractResult<ModelHandle> {
     let meta = read_meta(proto);
     let onnx = tract_onnx::onnx();
     let (h, w) = (meta.imgsz.0 as i32, meta.imgsz.1 as i32);
@@ -487,7 +534,7 @@ fn build_from_proto(proto: &tract_onnx::pb::ModelProto) -> TractResult<ModelHand
     }
 
     let runnable = typed.into_runnable()?;
-    Ok(ModelHandle { meta, format, nc, names, runnable })
+    Ok(ModelHandle { meta, format, nc, names, out_shape, size_bytes, source, runnable })
 }
 
 pub fn infer_images(
@@ -549,6 +596,39 @@ pub fn emit_json(per_image: &[(PathBuf, Vec<Det>)]) {
         print!("]}}");
     }
     println!("]");
+}
+
+pub fn emit_info(handle: &ModelHandle) {
+    let fmt_name = match handle.format {
+        OutputFormat::V8Anchors => "V8Anchors ([1, 4+nc, N])",
+        OutputFormat::V5Anchors => "V5Anchors ([1, N, 5+nc])",
+        OutputFormat::PostNms => "PostNms ([1, K, 6])",
+    };
+    println!("source       : {}", handle.source);
+    println!("size         : {} bytes", handle.size_bytes);
+    if let Some(v) = &handle.meta.version {
+        println!("version      : {v}");
+    }
+    if let Some(t) = &handle.meta.task {
+        println!("task         : {t}");
+    }
+    println!("input imgsz  : {}x{}  (HxW)", handle.meta.imgsz.0, handle.meta.imgsz.1);
+    if let Some(s) = handle.meta.stride {
+        println!("stride       : {s}");
+    }
+    println!("output shape : {:?}", handle.out_shape);
+    println!("output format: {fmt_name}");
+    println!("end2end      : {}", handle.meta.end2end);
+    let default_conf = handle.meta.default_conf.unwrap_or(0.25);
+    let default_iou = handle.meta.default_iou.unwrap_or(0.45);
+    let conf_src = if handle.meta.default_conf.is_some() { "from ONNX metadata" } else { "CLI default" };
+    let iou_src = if handle.meta.default_iou.is_some() { "from ONNX metadata" } else { "CLI default" };
+    println!("default conf : {default_conf} ({conf_src})");
+    println!("default iou  : {default_iou} ({iou_src})");
+    println!("classes ({}):", handle.nc);
+    for (k, v) in &handle.names {
+        println!("  {:>3}: {}", k, v);
+    }
 }
 
 pub fn emit_tables(per_image: &[(PathBuf, Vec<Det>)]) {

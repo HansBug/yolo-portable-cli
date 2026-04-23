@@ -1,79 +1,244 @@
 # yolo-portable-cli
 
-A cross-platform, single-binary YOLO ONNX detection CLI written in Rust on top of the pure-Rust
-[`tract`](https://github.com/sonos/tract) runtime.
+A cross-platform, single-binary YOLO ONNX detection CLI written in Rust on top
+of the pure-Rust [`tract`](https://github.com/sonos/tract) runtime.
 
-- **No C/C++ runtime dependency.** Just `cargo build`. No `libonnxruntime.so`, no `libncnn.dylib`, no vendor runtime to ship alongside.
-- **Two build flavors** — pick per use case:
+- **No C/C++ runtime dependency.** Just `cargo build`. No `libonnxruntime.so`,
+  no `libncnn.dylib`, no vendor runtime to ship alongside.
+- **Two build flavors** sharing a single library:
   - `yolo-cli` (free): loads an ONNX file at runtime via `--model`.
-  - `yolo-cli-bundled`: the ONNX (graph + weights) is embedded at compile time via `include_bytes!`, producing a truly self-contained executable with no `--model` flag.
-- **Universal YOLO output decoder.** Auto-detects YOLOv5/v7 (anchors-major, with objectness), YOLOv8/v9/v10/v11/v12 (features-major, class-only), and post-NMS / end2end (`[K,6]`) layouts.
-- **Labels read from ONNX metadata.** Ultralytics embeds `names` in the ONNX `metadata_props`; the CLI parses it at load time. No hard-coded COCO list, no `--labels` flag.
-- **Correctness validated in CI** against Ultralytics' own `.predict()` across **8 platform/arch combinations × 6 YOLO versions = 48 jobs**.
+  - `yolo-cli-bundled`: ONNX (graph + weights) embedded at compile time via
+    `include_bytes!`, producing a truly self-contained executable with no
+    `--model` flag. Only built when the `bundled` Cargo feature is enabled.
+- **Universal YOLO output decoder.** Auto-detects YOLOv5/v7 (anchors-major,
+  with objectness), YOLOv8/v9/v10/v11/v12 (features-major, class-only), and
+  post-NMS / end2end (`[K,6]`) layouts, all from a single binary.
+- **Labels + imgsz read from ONNX metadata.** Ultralytics embeds `names` and
+  `imgsz` in `metadata_props`; the CLI parses them at load time. No hard-coded
+  COCO list, no `--labels` flag.
+- **Correctness validated in CI** against Ultralytics' own `.predict()` across
+  **8 platform/arch combinations × 6 YOLO versions**, with both variants
+  (free and bundled) built and verified in separate stages.
 
-## CI matrix — 48 combinations
-
-### Platforms (minimum-version long-term-free runners)
-
-| OS        | Arch    | Runner              | Target triple                     | Linking          |
-|-----------|---------|---------------------|-----------------------------------|------------------|
-| Linux     | x86_64  | `ubuntu-22.04`      | `x86_64-unknown-linux-gnu`        | glibc dyn        |
-| Linux     | x86_64  | `ubuntu-22.04`      | `x86_64-unknown-linux-musl`       | musl static      |
-| Linux     | aarch64 | `ubuntu-22.04-arm`  | `aarch64-unknown-linux-gnu`       | glibc dyn        |
-| Linux     | aarch64 | `ubuntu-22.04-arm`  | `aarch64-unknown-linux-musl`      | musl static      |
-| macOS 15  | x86_64  | `macos-15-intel`    | `x86_64-apple-darwin`             | system libs      |
-| macOS 14  | aarch64 | `macos-14`          | `aarch64-apple-darwin`            | system libs      |
-| Windows   | x86_64  | `windows-2022`      | `x86_64-pc-windows-msvc`          | `+crt-static`    |
-| Windows   | aarch64 | `windows-11-arm`    | `aarch64-pc-windows-gnullvm`      | llvm-mingw + static |
-
-Notes:
-- Linux is built **twice**: once against glibc (Ubuntu/Debian/Fedora deployment target) and once against musl (Alpine / any-distro static deployment). The musl build has no `.so` dependency.
-- macOS Intel uses `macos-15-intel` because `macos-13` was retired 2025-12 and `macos-15-intel` is the last free Intel macOS image (Apple is ending Intel support around Fall 2027).
-- Windows ARM64 uses the `pc-windows-gnullvm` triple rather than `pc-windows-msvc`, because tract-linalg's ARM64 assembly is in GAS syntax which MSVC's `armasm64.exe` cannot parse. `llvm-mingw` is downloaded at CI time to provide the LLVM toolchain (`aarch64-w64-mingw32-clang` + `lld`).
-
-### Model versions exported by Ultralytics 8.4.x (v5 through v12)
-
-`yolov5nu`, `yolov8n`, `yolov9t`, `yolov10n`, `yolo11n`, `yolo12n`
-
-All exported with `yolo export format=onnx opset=12 simplify=True imgsz=640`.
-
-Each (platform × model) cell in CI:
-1. Builds **both** `yolo-cli` and `yolo-cli-bundled`. `yolo-cli-bundled`'s build.rs reads `YOLO_MODEL_ONNX=../models/<matrix.model>.onnx` and bakes that specific ONNX into the binary via `include_bytes!`.
-2. Runs both binaries against three COCO fixture images (`bus.jpg`, `zidane.jpg`, `dog.jpg`) with `--json` and diffs against `tests/reference/<model>/<image>.json`.
-3. Uploads both binaries as an artifact named `yolo-cli-<platform>-<model>`.
-
-**Match criteria** per detection (determined empirically from the tract-vs-ORT fp32 drift observed across v5-v12): same class, IoU ≥ 0.95, |Δscore| ≤ 0.05; threshold-edge detections (score < 0.30) are allowed to be absent or extra on one side.
-
-## Build
+## Quickstart
 
 ```bash
-# Free variant (runtime --model) — same binary works for any Ultralytics-exported ONNX.
-cargo build --release --manifest-path rust/Cargo.toml --bin yolo-cli
+# Grab a prebuilt binary for your platform from the latest CI run's artifacts:
+#   https://github.com/HansBug/yolo-portable-cli/actions
+#
+# Or build yourself — see "Build guide" below.
 
-# Bundled variant with a specific model baked in.
-YOLO_MODEL_ONNX=../models/yolov8n.onnx \
-  cargo build --release --manifest-path rust/Cargo.toml --bin yolo-cli-bundled
+# Free: loads any YOLO ONNX at runtime.
+yolo-cli --model yolov8n.onnx --info                       # inspect the model
+yolo-cli --model yolov8n.onnx bus.jpg zidane.jpg           # pretty table per label per image
+yolo-cli --model yolov8n.onnx --json --conf 0.3 bus.jpg    # structured JSON
 
-# Truly portable Linux static (works on Alpine, CentOS 7, anything).
-rustup target add x86_64-unknown-linux-musl
-cargo build --release --manifest-path rust/Cargo.toml --target x86_64-unknown-linux-musl
-
-# Windows with static CRT (no VC++ redistributable needed).
-rustup target add x86_64-pc-windows-msvc
-cargo build --release --manifest-path rust/Cargo.toml --target x86_64-pc-windows-msvc
+# Bundled: same UX but no --model; the ONNX is baked in.
+yolo-cli-bundled --info
+yolo-cli-bundled --json bus.jpg zidane.jpg dog.jpg
 ```
 
-## Run
+## Build guide
+
+### Prerequisites
+
+| Tool                | Minimum version | Notes                                              |
+|---------------------|-----------------|----------------------------------------------------|
+| Rust (rustup)       | stable (≥ 1.76) | `rustup install stable`                            |
+| (Linux musl target) | —               | `sudo apt-get install musl-tools`                  |
+| (Windows ARM64)     | —               | LLVM-mingw, see the Windows ARM64 section          |
+| (optional) ONNX     | —               | Only for `yolo-cli-bundled`; pre-exported files live in `models/` |
+
+No Python, no Ultralytics, no ONNX Runtime are required at build time.
+
+### 1. Build only the free variant (any YOLO ONNX at runtime)
+
+The free variant **ignores** `YOLO_MODEL_ONNX` entirely. Its build.rs is a no-op
+because the `bundled` feature is off by default.
+
+```bash
+# Native host
+cargo build --release --manifest-path rust/Cargo.toml --bin yolo-cli
+# → rust/target/release/yolo-cli[.exe]
+
+# Explicit target (e.g. Linux musl static, works on Alpine / any distro)
+rustup target add x86_64-unknown-linux-musl
+sudo apt-get install -y musl-tools                          # host only
+cargo build --release --manifest-path rust/Cargo.toml \
+    --target x86_64-unknown-linux-musl --bin yolo-cli
+```
+
+### 2. Build only the bundled variant (with a specific ONNX baked in)
+
+The bundled binary is gated behind the `bundled` Cargo feature
+(`required-features = ["bundled"]`) and reads `YOLO_MODEL_ONNX` at build time.
+That env var may be relative to `rust/` (default: `../models/yolov8n.onnx`) or
+absolute.
+
+```bash
+# Bundle yolov8n (default)
+YOLO_MODEL_ONNX=../models/yolov8n.onnx \
+    cargo build --release --manifest-path rust/Cargo.toml \
+    --features bundled --bin yolo-cli-bundled
+
+# Bundle a different YOLO version
+YOLO_MODEL_ONNX=../models/yolo12n.onnx \
+    cargo build --release --manifest-path rust/Cargo.toml \
+    --features bundled --bin yolo-cli-bundled
+
+# Or an absolute path pointing at any Ultralytics-exported ONNX
+YOLO_MODEL_ONNX=/abs/path/to/my_custom_model.onnx \
+    cargo build --release --manifest-path rust/Cargo.toml \
+    --features bundled --bin yolo-cli-bundled
+```
+
+### 3. Build both at once
+
+```bash
+YOLO_MODEL_ONNX=../models/yolov8n.onnx \
+    cargo build --release --manifest-path rust/Cargo.toml \
+    --features bundled --bins
+# → rust/target/release/yolo-cli[.exe]          (free, model-agnostic)
+# → rust/target/release/yolo-cli-bundled[.exe]  (bundled with yolov8n)
+```
+
+### Platform-specific build recipes
+
+#### Linux — glibc dynamic (Ubuntu/Debian/Fedora target)
+
+```bash
+cargo build --release --manifest-path rust/Cargo.toml --bin yolo-cli
+# Resulting binary requires glibc ≥ 2.35 on Ubuntu 22.04 as-built.
+# Build on an older distro (e.g. Ubuntu 20.04) to lower the floor.
+```
+
+#### Linux — musl static (runs on Alpine, any Linux distro)
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+sudo apt-get install -y musl-tools
+
+cargo build --release --manifest-path rust/Cargo.toml \
+    --target x86_64-unknown-linux-musl --bin yolo-cli
+# Resulting binary has zero .so dependencies, works on any Linux.
+```
+
+For aarch64 Linux musl:
+```bash
+rustup target add aarch64-unknown-linux-musl
+sudo apt-get install -y musl-tools     # on an arm64 host, musl-gcc covers aarch64
+cargo build --release --manifest-path rust/Cargo.toml \
+    --target aarch64-unknown-linux-musl --bin yolo-cli
+```
+
+#### macOS — Intel + Apple Silicon
+
+```bash
+rustup target add x86_64-apple-darwin aarch64-apple-darwin
+cargo build --release --manifest-path rust/Cargo.toml \
+    --target x86_64-apple-darwin --bin yolo-cli
+cargo build --release --manifest-path rust/Cargo.toml \
+    --target aarch64-apple-darwin --bin yolo-cli
+
+# Optional: produce a universal binary
+lipo -create -output yolo-cli \
+     rust/target/x86_64-apple-darwin/release/yolo-cli \
+     rust/target/aarch64-apple-darwin/release/yolo-cli
+```
+
+#### Windows — x86_64 MSVC (static CRT, no VC++ redistributable needed)
+
+```bash
+rustup target add x86_64-pc-windows-msvc
+cargo build --release --manifest-path rust/Cargo.toml \
+    --target x86_64-pc-windows-msvc --bin yolo-cli
+```
+
+The repo's `rust/.cargo/config.toml` already sets
+`target-feature=+crt-static` for Windows MSVC targets, so the produced `.exe`
+has no `VCRUNTIME*.dll` dependency.
+
+#### Windows — aarch64 (via gnullvm / LLVM toolchain)
+
+tract-linalg emits GAS-syntax ARM64 assembly, which MSVC's `armasm64` can't
+parse.  Use the `pc-windows-gnullvm` triple plus
+[mstorsjo/llvm-mingw](https://github.com/mstorsjo/llvm-mingw) for a working
+LLVM toolchain (clang + lld):
+
+```powershell
+# Download llvm-mingw for the host arch (aarch64 on a Windows-on-ARM machine)
+curl.exe -LO https://github.com/mstorsjo/llvm-mingw/releases/download/20250730/llvm-mingw-20250730-ucrt-aarch64.zip
+7z x llvm-mingw-*.zip -oC:\llvm-mingw
+$env:PATH = "C:\llvm-mingw\llvm-mingw-20250730-ucrt-aarch64\bin;$env:PATH"
+
+rustup target add aarch64-pc-windows-gnullvm
+cargo build --release --manifest-path rust/Cargo.toml `
+    --target aarch64-pc-windows-gnullvm --bin yolo-cli
+```
+
+### Export an ONNX for the bundled build
+
+```bash
+pip install ultralytics
+yolo export model=yolov8n.pt format=onnx opset=12 simplify=True imgsz=640
+#                                        ^^^^^^^^^ ^^^^^^^^^^^^^ ^^^^^^^^^^^
+#                                        critical  critical      must match
+```
+
+Keep `dynamic=False` (default), don't pass `nms=True` — NMS is done by the
+Rust CLI in ~5 ms and tract's coverage for NMS-related ops is narrower than
+for the dense backbone.
+
+Ultralytics 8.3+ supports v5u, v8, v9, v10, v11, v12 (plus older v3).  The
+CLI auto-detects the output layout from the graph + metadata, so a single
+`yolo-cli` binary works with any of them.
+
+## Usage
 
 ```bash
 # Free
-yolo-cli --model MODEL.onnx [--conf 0.25] [--iou 0.45] [--json] IMG [IMG ...]
+yolo-cli --model MODEL.onnx [--conf F] [--iou F] [--json] [--info] IMG [IMG ...]
 
-# Bundled (model is embedded at compile time; no --model flag)
-yolo-cli-bundled             [--conf 0.25] [--iou 0.45] [--json] IMG [IMG ...]
+# Bundled (model baked in; no --model)
+yolo-cli-bundled             [--conf F] [--iou F] [--json] [--info] IMG [IMG ...]
 ```
 
-### Pretty (default) — one aligned table per label per image
+### Inspecting a model — `--info`
+
+```
+$ yolo-cli --model models/yolov8n.onnx --info
+source       : models/yolov8n.onnx
+size         : 12851087 bytes
+version      : 8.4.41
+task         : detect
+input imgsz  : 640x640  (HxW)
+stride       : 32
+output shape : [1, 84, 8400]
+output format: V8Anchors ([1, 4+nc, N])
+end2end      : false
+default conf : 0.25 (CLI default)
+default iou  : 0.45 (CLI default)
+classes (80):
+    0: person
+    1: bicycle
+    ...
+   79: toothbrush
+```
+
+### Default-threshold resolution
+
+`--conf` and `--iou` resolve in this order:
+
+1. Explicit `--conf F` / `--iou F` on the command line wins.
+2. Otherwise, if the ONNX `metadata_props` has a `conf`/`conf_threshold`/`score_threshold`
+   or `iou`/`iou_threshold`/`nms_iou_threshold` entry, that value is used.
+   Ultralytics' current exports don't embed these; this hook is future-facing.
+3. Otherwise, built-in defaults `conf=0.25`, `iou=0.45` (matching Ultralytics'
+   Python `predict()` defaults).
+
+Run `--info` to see which source is in effect for the current model.
+
+### Pretty tables (default)
 
 ```
 == assets/bus.jpg ==
@@ -92,7 +257,7 @@ person (4 detections):
   0.423    0.5  548.9   59.4  868.3
 ```
 
-### Structured — `--json`
+### Structured JSON — `--json`
 
 ```json
 [{"image":"assets/bus.jpg","detections":[
@@ -104,28 +269,57 @@ person (4 detections):
 ]}]
 ```
 
+## CI matrix
+
+The workflow at `.github/workflows/ci.yml` runs four stages, totalling
+**8 + 48 + 48 + 48 = 152 jobs**:
+
+| Stage           | Cells             | Purpose                                                             |
+|-----------------|-------------------|---------------------------------------------------------------------|
+| `free-build`    | 8 (platform)      | Build `yolo-cli` once per platform, upload artifact                 |
+| `free-verify`   | 48 (platform×model) | Pull free artifact, run it against each model, diff with reference  |
+| `bundled-build` | 48 (platform×model) | Build `yolo-cli-bundled` with `YOLO_MODEL_ONNX=<model>.onnx`, upload |
+| `bundled-verify`| 48 (platform×model) | **Clean env** — sparse-checkout (no `models/`), no Rust, just run binary + verify |
+
+### Platforms — minimum long-term-free runners
+
+| OS        | Arch    | Runner              | Target triple                     | Linking              |
+|-----------|---------|---------------------|-----------------------------------|----------------------|
+| Linux     | x86_64  | `ubuntu-22.04`      | `x86_64-unknown-linux-gnu`        | glibc dynamic        |
+| Linux     | x86_64  | `ubuntu-22.04`      | `x86_64-unknown-linux-musl`       | musl static          |
+| Linux     | aarch64 | `ubuntu-22.04-arm`  | `aarch64-unknown-linux-gnu`       | glibc dynamic        |
+| Linux     | aarch64 | `ubuntu-22.04-arm`  | `aarch64-unknown-linux-musl`      | musl static          |
+| macOS 15  | x86_64  | `macos-15-intel`    | `x86_64-apple-darwin`             | system libs          |
+| macOS 14  | aarch64 | `macos-14`          | `aarch64-apple-darwin`            | system libs          |
+| Windows   | x86_64  | `windows-2022`      | `x86_64-pc-windows-msvc`          | `+crt-static`        |
+| Windows   | aarch64 | `windows-11-arm`    | `aarch64-pc-windows-gnullvm`      | llvm-mingw + static  |
+
+### Models in the matrix
+
+`yolov5nu`, `yolov8n`, `yolov9t`, `yolov10n`, `yolo11n`, `yolo12n` — all exported
+with `yolo export format=onnx opset=12 simplify=True imgsz=640`.
+
+### Match criteria
+
+The `bundled-verify` stage runs with **no Rust, no cargo, no `models/` directory**
+(sparse checkout excludes it) — proving each binary is 100% self-contained.
+
+Reference detections in `tests/reference/<model>/<image>.json` come from
+Ultralytics' own ONNX Runtime path.  Match criteria: same class, IoU ≥ 0.95,
+|Δscore| ≤ 0.05.  Threshold-edge detections (score < 0.30) are allowed to
+be absent/extra on one side — those are numerical fp32 accumulation drifts,
+not model-behaviour regressions.
+
 ## Output-shape auto-detection
 
-The binary reads the ONNX output fact and picks a decoder automatically:
+| Shape           | Layout                                        | Applies to                         |
+|-----------------|-----------------------------------------------|------------------------------------|
+| `[1, 4+nc, N]`  | features-major, no objectness                 | YOLOv8 / v9 / v10 / v11 / v12 raw  |
+| `[1, N, 5+nc]`  | anchors-major, `[cx,cy,w,h,obj, cls..]`       | YOLOv5 / v7 raw (original repo)    |
+| `[1, K, 6]`     | `[x1,y1,x2,y2,score,cls]` (already NMS'd)     | YOLOv10 end2end, `nms=True` export |
 
-| Shape                   | Layout                                            | Applies to                         |
-|-------------------------|---------------------------------------------------|------------------------------------|
-| `[1, 4+nc, N]`          | features-major, no objectness                     | YOLOv8 / v9 / v10 / v11 / v12 raw  |
-| `[1, N, 5+nc]`          | anchors-major, `[cx,cy,w,h,obj, cls..]`           | YOLOv5 / v7 raw (original repo)    |
-| `[1, K, 6]`             | `[x1,y1,x2,y2,score,cls]` (already NMS'd)         | YOLOv10 end2end, `nms=True` export |
-
-`nc` is read from the `names` metadata dict (Ultralytics embeds it as a
-Python-dict repr: `{0: 'person', 1: 'bicycle', ...}`). If the model lacks
-metadata, `nc` is inferred from the output shape and labels fall back to
-`class_<id>`.
-
-## Export a model
-
-```bash
-pip install ultralytics
-yolo export model=yolov8n.pt format=onnx opset=12 simplify=True imgsz=640
-# → yolov8n.onnx (12.3 MB)
-```
+Detected automatically from the optimised graph's output fact + the `end2end`
+metadata hint.
 
 ## License
 

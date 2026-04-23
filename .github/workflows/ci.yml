@@ -9,100 +9,63 @@ on:
 permissions:
   contents: read
 
+# All jobs share the same platform-to-{os,target,ext} mapping. YAML doesn't let
+# us reuse matrix `include` across jobs, so each job redeclares it.  Models is
+# a flat list used by every job except free-build.
+#
+# Platform rationale:
+#   * ubuntu-22.04          — oldest still-supported free x86_64 runner (glibc 2.35)
+#   * ubuntu-22.04-arm      — free ARM64 Linux for public repos
+#   * macos-15-intel        — macos-13 retired 2025-12; macos-15-intel is the last
+#                             free Intel macOS image (Apple deprecating Intel ~Fall 2027)
+#   * macos-14              — first free ARM64 macOS runner
+#   * windows-2022          — oldest Windows LTS runner still available
+#   * windows-11-arm        — free ARM64 Windows for public repos
+#
+# Windows ARM64 uses the `pc-windows-gnullvm` triple because tract-linalg emits
+# GAS-flavored ARM64 .S files; MSVC's armasm64 can't parse them, so we cross via
+# llvm-mingw.  Linux musl static builds use the musl-tools apt package.
+
 jobs:
-  build-and-verify:
-    name: ${{ matrix.platform }} / ${{ matrix.model }}
+  # ---------------------------------------------------------------------------
+  # Stage 1A: build the free `yolo-cli` binary — one build per platform,
+  # independent of the embedded ONNX model.
+  # ---------------------------------------------------------------------------
+  free-build:
+    name: free build (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        platform:
-          - linux-x86_64-gnu
-          - linux-aarch64-gnu
-          - linux-x86_64-musl
-          - linux-aarch64-musl
-          - macos-x86_64
-          - macos-aarch64
-          - windows-x86_64
-          - windows-aarch64
-        model:
-          - yolov5nu
-          - yolov8n
-          - yolov9t
-          - yolov10n
-          - yolo11n
-          - yolo12n
         include:
-          - platform: linux-x86_64-gnu
-            os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            ext: ""
-          - platform: linux-aarch64-gnu
-            os: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-gnu
-            ext: ""
-          - platform: linux-x86_64-musl
-            os: ubuntu-22.04
-            target: x86_64-unknown-linux-musl
-            ext: ""
-          - platform: linux-aarch64-musl
-            os: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-musl
-            ext: ""
-          # macOS: macos-13 Intel was retired 2025-12; macos-15-intel is the
-          # last free Intel runner (end of life ~Fall 2027 per Apple).
-          - platform: macos-x86_64
-            os: macos-15-intel
-            target: x86_64-apple-darwin
-            ext: ""
-          - platform: macos-aarch64
-            os: macos-14
-            target: aarch64-apple-darwin
-            ext: ""
-          - platform: windows-x86_64
-            os: windows-2022
-            target: x86_64-pc-windows-msvc
-            ext: ".exe"
-          # Windows ARM64: tract-linalg's GAS-style ARM64 assembly can't be
-          # consumed by MSVC armasm64, so we cross to the LLVM toolchain via
-          # the gnullvm triple + llvm-mingw (installed below).
-          - platform: windows-aarch64
-            os: windows-11-arm
-            target: aarch64-pc-windows-gnullvm
-            ext: ".exe"
-
+          - { platform: linux-x86_64-gnu,   os: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,    ext: "" }
+          - { platform: linux-aarch64-gnu,  os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu,   ext: "" }
+          - { platform: linux-x86_64-musl,  os: ubuntu-22.04,     target: x86_64-unknown-linux-musl,   ext: "" }
+          - { platform: linux-aarch64-musl, os: ubuntu-22.04-arm, target: aarch64-unknown-linux-musl,  ext: "" }
+          - { platform: macos-x86_64,       os: macos-15-intel,   target: x86_64-apple-darwin,         ext: "" }
+          - { platform: macos-aarch64,      os: macos-14,         target: aarch64-apple-darwin,        ext: "" }
+          - { platform: windows-x86_64,     os: windows-2022,     target: x86_64-pc-windows-msvc,      ext: ".exe" }
+          - { platform: windows-aarch64,    os: windows-11-arm,   target: aarch64-pc-windows-gnullvm,  ext: ".exe" }
     defaults:
       run:
         shell: bash
-
-    env:
-      FREE_BIN: yolo-cli${{ matrix.ext }}
-      BUNDLED_BIN: yolo-cli-bundled${{ matrix.ext }}
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install musl tools
+      - name: Install musl-tools
         if: endsWith(matrix.target, '-musl')
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Install llvm-mingw (Windows gnullvm)
         if: endsWith(matrix.target, '-pc-windows-gnullvm')
         run: |
-          # llvm-mingw provides aarch64-w64-mingw32-clang + lld needed by rustc's
-          # *-pc-windows-gnullvm target. MSVC's armasm64 can't parse tract-linalg's
-          # GAS-flavored ARM64 assembly, so we build with the LLVM toolchain.
           URL="https://github.com/mstorsjo/llvm-mingw/releases/download/20250730/llvm-mingw-20250730-ucrt-aarch64.zip"
-          curl -fsSL -o llvm-mingw.zip "$URL"
-          7z x llvm-mingw.zip -oC:/llvm-mingw >/dev/null
-          DIR=$(ls -d C:/llvm-mingw/llvm-mingw-*/bin)
-          echo "$DIR" >> "$GITHUB_PATH"
-          "$DIR/aarch64-w64-mingw32-clang" --version || true
+          curl -fsSL -o mingw.zip "$URL"
+          7z x mingw.zip -oC:/llvm-mingw >/dev/null
+          echo "$(ls -d C:/llvm-mingw/llvm-mingw-*/bin)" >> "$GITHUB_PATH"
 
-      - name: Install Rust stable + target
+      - name: Install Rust + target
         run: |
           rustup toolchain install stable --profile minimal
           rustup target add ${{ matrix.target }}
@@ -116,65 +79,253 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             rust/target
-          # platform + model in key: changing YOLO_MODEL_ONNX forces the
-          # bundled binary's build.rs to rerun, so model membership is real cache state.
-          key: cargo-${{ matrix.platform }}-${{ matrix.model }}-${{ hashFiles('rust/Cargo.lock') }}
+          key: cargo-free-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
-            cargo-${{ matrix.platform }}-${{ matrix.model }}-
-            cargo-${{ matrix.platform }}-
+            cargo-free-${{ matrix.platform }}-
 
-      - name: Build both binaries (YOLO_MODEL_ONNX=${{ matrix.model }}.onnx)
+      - name: Build yolo-cli (free; no bundled feature, no YOLO_MODEL_ONNX)
+        working-directory: rust
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin yolo-cli
+
+      - name: Diagnose binary
+        working-directory: rust
+        run: |
+          BIN=target/${{ matrix.target }}/release/yolo-cli${{ matrix.ext }}
+          ls -la "$BIN"
+          command -v file  >/dev/null 2>&1 && file "$BIN" || true
+          command -v ldd   >/dev/null 2>&1 && ldd "$BIN" 2>&1 || true
+          command -v otool >/dev/null 2>&1 && otool -L "$BIN" || true
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: yolo-cli-${{ matrix.platform }}
+          path: rust/target/${{ matrix.target }}/release/yolo-cli${{ matrix.ext }}
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Stage 1B: pull the free binary back and verify detections for each of the
+  # 6 YOLO models.  (8 platforms × 6 models = 48 cells.)  Binary is already
+  # built, so no Rust, no cargo cache — just the binary + Python stdlib.
+  # ---------------------------------------------------------------------------
+  free-verify:
+    name: free verify (${{ matrix.platform }} / ${{ matrix.model }})
+    needs: free-build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux-x86_64-gnu
+          - linux-aarch64-gnu
+          - linux-x86_64-musl
+          - linux-aarch64-musl
+          - macos-x86_64
+          - macos-aarch64
+          - windows-x86_64
+          - windows-aarch64
+        model: [yolov5nu, yolov8n, yolov9t, yolov10n, yolo11n, yolo12n]
+        include:
+          - { platform: linux-x86_64-gnu,   os: ubuntu-22.04,     ext: "" }
+          - { platform: linux-aarch64-gnu,  os: ubuntu-22.04-arm, ext: "" }
+          - { platform: linux-x86_64-musl,  os: ubuntu-22.04,     ext: "" }
+          - { platform: linux-aarch64-musl, os: ubuntu-22.04-arm, ext: "" }
+          - { platform: macos-x86_64,       os: macos-15-intel,   ext: "" }
+          - { platform: macos-aarch64,      os: macos-14,         ext: "" }
+          - { platform: windows-x86_64,     os: windows-2022,     ext: ".exe" }
+          - { platform: windows-aarch64,    os: windows-11-arm,   ext: ".exe" }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download yolo-cli
+        uses: actions/download-artifact@v4
+        with:
+          name: yolo-cli-${{ matrix.platform }}
+          path: bin
+
+      - name: Mark executable
+        if: ${{ !startsWith(matrix.platform, 'windows-') }}
+        run: chmod +x "bin/yolo-cli${{ matrix.ext }}"
+
+      - name: Smoke-test --info
+        run: |
+          BIN="bin/yolo-cli${{ matrix.ext }}"
+          "$BIN" --version
+          "$BIN" --model "models/${{ matrix.model }}.onnx" --info
+
+      - name: Verify detections
+        run: |
+          python3 scripts/verify.py \
+            "bin/yolo-cli${{ matrix.ext }}" \
+            ${{ matrix.model }} \
+            assets/bus.jpg assets/zidane.jpg assets/dog.jpg
+
+  # ---------------------------------------------------------------------------
+  # Stage 2A: build the bundled `yolo-cli-bundled` binary, one per (platform,
+  # model) pair — the ONNX is embedded via include_bytes! at compile time.
+  # ---------------------------------------------------------------------------
+  bundled-build:
+    name: bundled build (${{ matrix.platform }} / ${{ matrix.model }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux-x86_64-gnu
+          - linux-aarch64-gnu
+          - linux-x86_64-musl
+          - linux-aarch64-musl
+          - macos-x86_64
+          - macos-aarch64
+          - windows-x86_64
+          - windows-aarch64
+        model: [yolov5nu, yolov8n, yolov9t, yolov10n, yolo11n, yolo12n]
+        include:
+          - { platform: linux-x86_64-gnu,   os: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,    ext: "" }
+          - { platform: linux-aarch64-gnu,  os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu,   ext: "" }
+          - { platform: linux-x86_64-musl,  os: ubuntu-22.04,     target: x86_64-unknown-linux-musl,   ext: "" }
+          - { platform: linux-aarch64-musl, os: ubuntu-22.04-arm, target: aarch64-unknown-linux-musl,  ext: "" }
+          - { platform: macos-x86_64,       os: macos-15-intel,   target: x86_64-apple-darwin,         ext: "" }
+          - { platform: macos-aarch64,      os: macos-14,         target: aarch64-apple-darwin,        ext: "" }
+          - { platform: windows-x86_64,     os: windows-2022,     target: x86_64-pc-windows-msvc,      ext: ".exe" }
+          - { platform: windows-aarch64,    os: windows-11-arm,   target: aarch64-pc-windows-gnullvm,  ext: ".exe" }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl-tools
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install llvm-mingw (Windows gnullvm)
+        if: endsWith(matrix.target, '-pc-windows-gnullvm')
+        run: |
+          URL="https://github.com/mstorsjo/llvm-mingw/releases/download/20250730/llvm-mingw-20250730-ucrt-aarch64.zip"
+          curl -fsSL -o mingw.zip "$URL"
+          7z x mingw.zip -oC:/llvm-mingw >/dev/null
+          echo "$(ls -d C:/llvm-mingw/llvm-mingw-*/bin)" >> "$GITHUB_PATH"
+
+      - name: Install Rust + target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }}
+          rustup default stable
+
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rust/target
+          key: cargo-bundled-${{ matrix.platform }}-${{ matrix.model }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            cargo-bundled-${{ matrix.platform }}-${{ matrix.model }}-
+            cargo-bundled-${{ matrix.platform }}-
+
+      - name: Build yolo-cli-bundled (YOLO_MODEL_ONNX=${{ matrix.model }}.onnx, --features bundled)
         working-directory: rust
         env:
           YOLO_MODEL_ONNX: ../models/${{ matrix.model }}.onnx
-        run: |
-          cargo build --release --locked --target ${{ matrix.target }} --bins
+        run: cargo build --release --locked --features bundled --target ${{ matrix.target }} --bin yolo-cli-bundled
 
-      - name: Binary info
+      - name: Diagnose binary
         working-directory: rust
         run: |
-          FREE=target/${{ matrix.target }}/release/${{ env.FREE_BIN }}
-          BUNDLED=target/${{ matrix.target }}/release/${{ env.BUNDLED_BIN }}
-          ls -la "$FREE" "$BUNDLED"
-          command -v file  >/dev/null 2>&1 && { file "$FREE"; file "$BUNDLED"; } || true
-          command -v ldd   >/dev/null 2>&1 && { echo "-- ldd free --"; ldd "$FREE" 2>&1 || true; echo "-- ldd bundled --"; ldd "$BUNDLED" 2>&1 || true; } || true
-          command -v otool >/dev/null 2>&1 && { otool -L "$FREE" || true; otool -L "$BUNDLED" || true; } || true
-          command -v dumpbin >/dev/null 2>&1 && { dumpbin //DEPENDENTS "$FREE" || true; dumpbin //DEPENDENTS "$BUNDLED" || true; } || true
+          BIN=target/${{ matrix.target }}/release/yolo-cli-bundled${{ matrix.ext }}
+          ls -la "$BIN"
+          command -v file  >/dev/null 2>&1 && file "$BIN" || true
+          command -v ldd   >/dev/null 2>&1 && ldd "$BIN" 2>&1 || true
+          command -v otool >/dev/null 2>&1 && otool -L "$BIN" || true
 
-      - name: Sanity run (free + bundled)
-        working-directory: rust
-        run: |
-          FREE=target/${{ matrix.target }}/release/${{ env.FREE_BIN }}
-          BUNDLED=target/${{ matrix.target }}/release/${{ env.BUNDLED_BIN }}
-          echo "::group::--help / --version"
-          "$FREE" --version || true
-          "$FREE" --help || true
-          "$BUNDLED" --version || true
-          "$BUNDLED" --help || true
-          echo "::endgroup::"
-
-      - name: Verify free binary against reference
-        working-directory: ${{ github.workspace }}
-        run: |
-          python3 scripts/verify.py \
-            rust/target/${{ matrix.target }}/release/${{ env.FREE_BIN }} \
-            ${{ matrix.model }} \
-            assets/bus.jpg assets/zidane.jpg assets/dog.jpg
-
-      - name: Verify bundled binary against reference
-        working-directory: ${{ github.workspace }}
-        run: |
-          python3 scripts/verify.py \
-            rust/target/${{ matrix.target }}/release/${{ env.BUNDLED_BIN }} \
-            ${{ matrix.model }} \
-            assets/bus.jpg assets/zidane.jpg assets/dog.jpg
-
-      - name: Upload binaries
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: yolo-cli-${{ matrix.platform }}-${{ matrix.model }}
-          path: |
-            rust/target/${{ matrix.target }}/release/${{ env.FREE_BIN }}
-            rust/target/${{ matrix.target }}/release/${{ env.BUNDLED_BIN }}
-          retention-days: 14
+          name: yolo-cli-bundled-${{ matrix.platform }}-${{ matrix.model }}
+          path: rust/target/${{ matrix.target }}/release/yolo-cli-bundled${{ matrix.ext }}
           if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Stage 2B: run the bundled binary in a **clean env** — no Rust toolchain, no
+  # cargo cache, and the repo is sparse-checked-out to exclude `models/` so the
+  # binary must rely solely on its embedded ONNX.  Still needs Python 3 stdlib
+  # and the reference JSONs / fixture images.
+  # ---------------------------------------------------------------------------
+  bundled-verify:
+    name: bundled verify (${{ matrix.platform }} / ${{ matrix.model }})
+    needs: bundled-build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux-x86_64-gnu
+          - linux-aarch64-gnu
+          - linux-x86_64-musl
+          - linux-aarch64-musl
+          - macos-x86_64
+          - macos-aarch64
+          - windows-x86_64
+          - windows-aarch64
+        model: [yolov5nu, yolov8n, yolov9t, yolov10n, yolo11n, yolo12n]
+        include:
+          - { platform: linux-x86_64-gnu,   os: ubuntu-22.04,     ext: "" }
+          - { platform: linux-aarch64-gnu,  os: ubuntu-22.04-arm, ext: "" }
+          - { platform: linux-x86_64-musl,  os: ubuntu-22.04,     ext: "" }
+          - { platform: linux-aarch64-musl, os: ubuntu-22.04-arm, ext: "" }
+          - { platform: macos-x86_64,       os: macos-15-intel,   ext: "" }
+          - { platform: macos-aarch64,      os: macos-14,         ext: "" }
+          - { platform: windows-x86_64,     os: windows-2022,     ext: ".exe" }
+          - { platform: windows-aarch64,    os: windows-11-arm,   ext: ".exe" }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Sparse checkout (no models/ — binary must carry its own)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            assets
+            tests
+            scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Download bundled binary
+        uses: actions/download-artifact@v4
+        with:
+          name: yolo-cli-bundled-${{ matrix.platform }}-${{ matrix.model }}
+          path: bin
+
+      - name: Mark executable
+        if: ${{ !startsWith(matrix.platform, 'windows-') }}
+        run: chmod +x "bin/yolo-cli-bundled${{ matrix.ext }}"
+
+      - name: Confirm no Rust toolchain + no models/ present
+        run: |
+          echo "which rustc: $(command -v rustc || echo '(absent)')"
+          echo "which cargo: $(command -v cargo || echo '(absent)')"
+          echo "ls models/: $(ls models/ 2>&1 || echo '(not checked out)')"
+
+      - name: Smoke-test --info + --version
+        run: |
+          BIN="bin/yolo-cli-bundled${{ matrix.ext }}"
+          "$BIN" --version
+          "$BIN" --info
+
+      - name: Verify detections (bundled binary, standalone)
+        run: |
+          python3 scripts/verify.py \
+            "bin/yolo-cli-bundled${{ matrix.ext }}" \
+            ${{ matrix.model }} \
+            assets/bus.jpg assets/zidane.jpg assets/dog.jpg

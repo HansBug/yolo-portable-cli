@@ -1,16 +1,28 @@
-// build.rs — for the `yolo-cli-bundled` binary, resolves the ONNX file to embed.
+// build.rs — only does real work when the `bundled` Cargo feature is active.
 //
-// Reads the `YOLO_MODEL_ONNX` env var at build time; if unset, defaults to
-// `../models/yolov8n.onnx` (relative to this crate's root, i.e. the repo's
-// `models/` directory).  Emits `embedded_model.rs` under OUT_DIR that defines
-// MODEL_BYTES (via include_bytes!) and MODEL_ID (filename stem for diagnostics).
+// When `CARGO_FEATURE_BUNDLED` is set (implied by `--features bundled`), this
+// reads `YOLO_MODEL_ONNX` (default: `../models/yolov8n.onnx` relative to the
+// crate root), copies the ONNX bytes into OUT_DIR, and emits `embedded_model.rs`
+// with `MODEL_BYTES` (via include_bytes!) and `MODEL_ID` (filename stem).
+//
+// When the feature is off, the script exits without producing embedded_model.rs.
+// That's fine because `yolo-cli-bundled`'s source file is gated behind
+// `required-features = ["bundled"]` in Cargo.toml, so cargo won't try to compile
+// it and thus won't evaluate its `include!(...)` of embedded_model.rs.
 
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_BUNDLED");
     println!("cargo:rerun-if-env-changed=YOLO_MODEL_ONNX");
+
+    let feature_on = env::var_os("CARGO_FEATURE_BUNDLED").is_some();
+    if !feature_on {
+        // No work to do. The `yolo-cli-bundled` bin is gated out via required-features.
+        return;
+    }
 
     let default = "../models/yolov8n.onnx";
     let raw = env::var("YOLO_MODEL_ONNX").unwrap_or_else(|_| default.to_string());
@@ -32,9 +44,6 @@ fn main() {
 
     println!("cargo:rerun-if-changed={}", abs.display());
 
-    // Copy the ONNX into OUT_DIR so include_bytes! is path-stable regardless
-    // of where YOLO_MODEL_ONNX points (relative paths are resolved against the
-    // crate root above, and absolute paths would break reproducibility).
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let target_path = out_dir.join("embedded.onnx");
     fs::copy(&abs, &target_path).unwrap_or_else(|e| {
@@ -50,7 +59,5 @@ fn main() {
         model_id,
     );
     fs::write(out_dir.join("embedded_model.rs"), rs).unwrap();
-
-    // Re-expose for user-facing output so `yolo-cli-bundled --version` can show it.
     println!("cargo:rustc-env=BUNDLED_MODEL_ID={}", model_id);
 }
