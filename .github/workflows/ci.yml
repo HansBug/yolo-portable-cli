@@ -68,6 +68,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
+      - name: Install llvm-mingw (Windows gnullvm)
+        if: endsWith(matrix.target, '-pc-windows-gnullvm')
+        shell: bash
+        run: |
+          # llvm-mingw provides aarch64-w64-mingw32-clang + lld needed by rustc's
+          # *-pc-windows-gnullvm targets. MSVC's armasm64 cannot parse tract-linalg's
+          # GAS-flavored ARM64 assembly, so we build with the LLVM toolchain instead.
+          URL="https://github.com/mstorsjo/llvm-mingw/releases/download/20250730/llvm-mingw-20250730-ucrt-aarch64.zip"
+          curl -fsSL -o llvm-mingw.zip "$URL"
+          7z x llvm-mingw.zip -oC:/llvm-mingw >/dev/null
+          DIR=$(ls -d C:/llvm-mingw/llvm-mingw-*/bin)
+          echo "$DIR" >> "$GITHUB_PATH"
+          # sanity
+          "$DIR/aarch64-w64-mingw32-clang" --version || true
+
       - name: Install Rust stable + target
         run: |
           rustup toolchain install stable --profile minimal
