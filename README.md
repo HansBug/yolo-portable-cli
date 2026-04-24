@@ -33,6 +33,30 @@ If your ONNX wasn't produced by `yolo export` on an upstream Ultralytics
 model, this tool is not the right fit — look at
 [onnxruntime](https://onnxruntime.ai/) or a model-specific CLI instead.
 
+## Download prebuilt binaries
+
+The **free** `yolo-cli` is published as a single archive per platform with
+every release. Each archive contains the binary plus this README and the
+license file. Direct-download URLs always point at the latest release:
+
+| OS                | Arch    | Format    | Latest download                                                                                                                              |
+|-------------------|---------|-----------|----------------------------------------------------------------------------------------------------------------------------------------------|
+| Linux glibc       | x86_64  | tar.gz    | [`yolo-cli-linux-x86_64-gnu.tar.gz`](https://github.com/HansBug/yolo-portable-cli/releases/latest/download/yolo-cli-linux-x86_64-gnu.tar.gz)   |
+| Linux musl        | x86_64  | tar.gz    | [`yolo-cli-linux-x86_64-musl.tar.gz`](https://github.com/HansBug/yolo-portable-cli/releases/latest/download/yolo-cli-linux-x86_64-musl.tar.gz) |
+| Linux glibc       | aarch64 | tar.gz    | [`yolo-cli-linux-aarch64-gnu.tar.gz`](https://github.com/HansBug/yolo-portable-cli/releases/latest/download/yolo-cli-linux-aarch64-gnu.tar.gz) |
+| Linux musl        | aarch64 | tar.gz    | [`yolo-cli-linux-aarch64-musl.tar.gz`](https://github.com/HansBug/yolo-portable-cli/releases/latest/download/yolo-cli-linux-aarch64-musl.tar.gz) |
+| macOS (Intel)     | x86_64  | tar.gz    | [`yolo-cli-macos-x86_64.tar.gz`](https://github.com/HansBug/yolo-portable-cli/releases/latest/download/yolo-cli-macos-x86_64.tar.gz)           |
+| macOS (Apple Si)  | aarch64 | tar.gz    | [`yolo-cli-macos-aarch64.tar.gz`](https://github.com/HansBug/yolo-portable-cli/releases/latest/download/yolo-cli-macos-aarch64.tar.gz)         |
+| Windows           | x86_64  | zip       | [`yolo-cli-windows-x86_64.zip`](https://github.com/HansBug/yolo-portable-cli/releases/latest/download/yolo-cli-windows-x86_64.zip)             |
+| Windows           | aarch64 | zip       | [`yolo-cli-windows-aarch64.zip`](https://github.com/HansBug/yolo-portable-cli/releases/latest/download/yolo-cli-windows-aarch64.zip)           |
+
+For an older or specific release, see [the releases page](https://github.com/HansBug/yolo-portable-cli/releases).
+
+> Only the **free** variant ships as a download — point it at any
+> Ultralytics-exported ONNX with `--model`. The bundled variant has a model
+> baked into the binary at compile time, so distributing one prebuilt would
+> only fit one specific model; build it yourself per the recipes below.
+
 ## Features
 
 - **No C/C++ runtime dependency.** Just `cargo build`. No `libonnxruntime.so`,

@@ -1,0 +1,119 @@
+name: Release
+
+# Triggered when a GitHub Release is published (e.g. via `gh release create v0.0.1`).
+# Builds the **free** `yolo-cli` for all 8 supported platform/arch combinations,
+# verifies each binary against the committed reference detections (no split stages
+# — build + verify happen in the same job), packages the binary together with
+# README.md and LICENSE, and uploads the archive to the triggering release.
+
+on:
+  release:
+    types: [published]
+  # Manual trigger for dry-runs / ad-hoc rebuilds. Provide the existing tag name;
+  # archives are uploaded onto that release.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to upload assets to (must already exist)"
+        required: true
+        type: string
+
+permissions:
+  contents: write   # needed to upload assets to the release
+
+jobs:
+  build-verify-upload:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x86_64-gnu,   os: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,    ext: "",     archive: tar.gz }
+          - { platform: linux-aarch64-gnu,  os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu,   ext: "",     archive: tar.gz }
+          - { platform: linux-x86_64-musl,  os: ubuntu-22.04,     target: x86_64-unknown-linux-musl,   ext: "",     archive: tar.gz }
+          - { platform: linux-aarch64-musl, os: ubuntu-22.04-arm, target: aarch64-unknown-linux-musl,  ext: "",     archive: tar.gz }
+          - { platform: macos-x86_64,       os: macos-15-intel,   target: x86_64-apple-darwin,         ext: "",     archive: tar.gz }
+          - { platform: macos-aarch64,      os: macos-14,         target: aarch64-apple-darwin,        ext: "",     archive: tar.gz }
+          - { platform: windows-x86_64,     os: windows-2022,     target: x86_64-pc-windows-msvc,      ext: ".exe", archive: zip }
+          - { platform: windows-aarch64,    os: windows-11-arm,   target: aarch64-pc-windows-gnullvm,  ext: ".exe", archive: zip }
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      ARCHIVE_NAME: yolo-cli-${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl-tools
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install llvm-mingw (Windows gnullvm)
+        if: endsWith(matrix.target, '-pc-windows-gnullvm')
+        run: |
+          URL="https://github.com/mstorsjo/llvm-mingw/releases/download/20250730/llvm-mingw-20250730-ucrt-aarch64.zip"
+          curl -fsSL -o mingw.zip "$URL"
+          7z x mingw.zip -oC:/llvm-mingw >/dev/null
+          echo "$(ls -d C:/llvm-mingw/llvm-mingw-*/bin)" >> "$GITHUB_PATH"
+
+      - name: Install Rust + target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }}
+          rustup default stable
+
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rust/target
+          key: cargo-release-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            cargo-release-${{ matrix.platform }}-
+
+      - name: Build yolo-cli (free)
+        working-directory: rust
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin yolo-cli
+
+      - name: Verify against every committed YOLO version
+        run: |
+          BIN="rust/target/${{ matrix.target }}/release/yolo-cli${{ matrix.ext }}"
+          ls -la "$BIN"
+          for m in yolov5nu yolov8n yolov9t yolov10n yolo11n yolo12n; do
+            python3 scripts/verify.py "$BIN" "$m" \
+              assets/bus.jpg assets/zidane.jpg assets/dog.jpg
+          done
+
+      - name: Stage archive contents
+        run: |
+          mkdir -p staging/${{ env.ARCHIVE_NAME }}
+          cp "rust/target/${{ matrix.target }}/release/yolo-cli${{ matrix.ext }}" \
+             "staging/${{ env.ARCHIVE_NAME }}/"
+          cp README.md LICENSE "staging/${{ env.ARCHIVE_NAME }}/"
+          ls -la "staging/${{ env.ARCHIVE_NAME }}/"
+
+      - name: Pack (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          (cd staging && tar -czf "../${{ env.ARCHIVE_NAME }}.tar.gz" "${{ env.ARCHIVE_NAME }}")
+          ls -la "${{ env.ARCHIVE_NAME }}.tar.gz"
+
+      - name: Pack (zip)
+        if: matrix.archive == 'zip'
+        run: |
+          (cd staging && 7z a "../${{ env.ARCHIVE_NAME }}.zip" "${{ env.ARCHIVE_NAME }}")
+          ls -la "${{ env.ARCHIVE_NAME }}.zip"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ASSET="${{ env.ARCHIVE_NAME }}.${{ matrix.archive }}"
+          # `--clobber` overwrites a same-named asset if a previous run already uploaded one.
+          gh release upload "${{ env.TAG }}" "$ASSET" --repo "${{ github.repository }}" --clobber
